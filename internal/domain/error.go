@@ -5,6 +5,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 )
@@ -157,6 +158,48 @@ func IsCode(err error, code Code) bool {
 		return false
 	}
 	return de.Code == code
+}
+
+// idempotencyEnvelope is the on-the-wire shape of a persisted idempotency
+// result. It carries either a success marker or the original rejection, so an
+// identical retry replays the original outcome verbatim instead of silently
+// succeeding a pending-retry or out-of-range operation.
+type idempotencyEnvelope struct {
+	OK    bool   `json:"ok,omitempty"`
+	Error *Error `json:"error,omitempty"`
+}
+
+// EncodeIdempotencyResult serializes the original operation outcome for the
+// idempotency ledger. A nil outcome is a success; a *Error is the rejection
+// that the retry must replay.
+func EncodeIdempotencyResult(opErr error) string {
+	de, _ := opErr.(*Error)
+	if de == nil {
+		b, _ := json.Marshal(idempotencyEnvelope{OK: true})
+		return string(b)
+	}
+	b, _ := json.Marshal(idempotencyEnvelope{Error: de})
+	return string(b)
+}
+
+// DecodeIdempotencyResult restores the original operation outcome from the
+// idempotency ledger. It returns the rejection the original attempt produced,
+// or nil when the original attempt succeeded.
+func DecodeIdempotencyResult(result string) error {
+	if result == "" {
+		return nil
+	}
+	var env idempotencyEnvelope
+	if err := json.Unmarshal([]byte(result), &env); err != nil {
+		return nil
+	}
+	if env.Error != nil {
+		// Reasons are persisted in sorted order; rebuild the slice so callers
+		// see the same stable, sorted reason set as the original attempt.
+		env.Error.sortReasons()
+		return env.Error
+	}
+	return nil
 }
 
 // BoltKey builds the canonical "<node>/<bolt>" key used for reason ordering

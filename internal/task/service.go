@@ -188,8 +188,10 @@ func (s *Service) loadForWrite(ctx context.Context, tx store.Tx, taskID string, 
 
 // checkIdempotent reports whether an identical operation was already committed
 // and returns IDEMPOTENCY_CONFLICT when the operation number is reused with
-// different content.
-func checkIdempotent(ctx context.Context, tx store.Tx, op domain.OperationNo, taskID, digest string) (bool, error) {
+// different content. When the content matches, it restores the original
+// operation outcome via outErr so a retry replays the original result — a
+// pending-retry or out-of-range rejection is replayed, not silently swallowed.
+func checkIdempotent(ctx context.Context, tx store.Tx, op domain.OperationNo, taskID, digest string, outErr *error) (bool, error) {
 	e, ok, err := tx.GetIdempotency(ctx, op, taskID)
 	if err != nil {
 		return false, err
@@ -198,13 +200,19 @@ func checkIdempotent(ctx context.Context, tx store.Tx, op domain.OperationNo, ta
 		return false, nil
 	}
 	if e.Digest == digest {
+		if outErr != nil {
+			*outErr = domain.DecodeIdempotencyResult(e.Result)
+		}
 		return true, nil
 	}
 	return false, domain.NewError(domain.CodeIdempotencyConflict, "operation number reused with different content")
 }
 
-func recordIdempotent(ctx context.Context, tx store.Tx, op domain.OperationNo, taskID, digest string) error {
-	return tx.PutIdempotency(ctx, store.IdempotencyEntry{OperationNo: op, TaskID: taskID, Digest: digest, Result: "{}"})
+func recordIdempotent(ctx context.Context, tx store.Tx, op domain.OperationNo, taskID, digest string, opErr error) error {
+	return tx.PutIdempotency(ctx, store.IdempotencyEntry{
+		OperationNo: op, TaskID: taskID, Digest: digest,
+		Result: domain.EncodeIdempotencyResult(opErr),
+	})
 }
 
 // VerifyPair validates a connection-pair identity and socket against the locked
@@ -213,7 +221,7 @@ func (s *Service) VerifyPair(taskID string, rev domain.Revision, r PairVerifyReq
 	digest := domain.Digest(r)
 	return s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
-		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest, nil)
 		if err != nil {
 			return err
 		}
@@ -280,7 +288,7 @@ func (s *Service) VerifyPair(taskID string, rev domain.Revision, r PairVerifyReq
 			return err
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: "PAIR_VERIFY", ContentDigest: digest, Committed: true})
-		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest, nil)
 	})
 }
 
@@ -327,7 +335,7 @@ func (s *Service) RecheckTorque(taskID string, rev domain.Revision, r RecheckReq
 	var opErr error
 	err := s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
-		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest, &opErr)
 		if err != nil {
 			return err
 		}
@@ -377,7 +385,7 @@ func (s *Service) RecheckTorque(taskID string, rev domain.Revision, r RecheckReq
 			return err
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: "TORQUE_RECHECK", ContentDigest: digest, Committed: true})
-		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest, opErr)
 	})
 	if err != nil {
 		return err
@@ -430,7 +438,7 @@ func (s *Service) tighten(taskID string, rev domain.Revision, r TightenRequest, 
 	digest := domain.Digest(r)
 	return s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
-		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest, nil)
 		if err != nil {
 			return err
 		}
@@ -505,7 +513,7 @@ func (s *Service) tighten(taskID string, rev domain.Revision, r TightenRequest, 
 			kind = "TIGHTEN_FINAL"
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: kind, ContentDigest: digest, Committed: true})
-		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest, nil)
 	})
 }
 
@@ -558,7 +566,7 @@ func (s *Service) SubmitSampling(taskID string, rev domain.Revision, r SamplingR
 	var opErr error
 	err := s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
-		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		replay, err := checkIdempotent(ctx, tx, r.OperationNo, taskID, digest, &opErr)
 		if err != nil {
 			return err
 		}
@@ -621,7 +629,7 @@ func (s *Service) SubmitSampling(taskID string, rev domain.Revision, r SamplingR
 			return err
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: "SAMPLING", ContentDigest: digest, Committed: true})
-		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest)
+		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest, opErr)
 	})
 	if err != nil {
 		return err
