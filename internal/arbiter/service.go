@@ -123,9 +123,8 @@ func (s *Service) Finalize(req FinalizeRequest) (*domain.FinalDecision, error) {
 
 		decision := domain.FinalDecision{
 			TaskID: req.TaskID, Type: req.Type, WinningOperation: req.OperationNo,
-			ReasonSummary: s.reasonSummary(req.Type), SubmittedAt: s.clock.Now(),
-		}
-		decision.Credential = "CRED-" + domain.Digest(decision)[:16]
+			ReasonSummary: domain.ReasonSummary(req.Type), SubmittedAt: s.clock.Now(),
+		}.WithCredential()
 
 		oldRev := t.Revision
 		t.Status = terminalStatus(req.Type)
@@ -168,17 +167,6 @@ func terminalStatus(ft domain.FinalType) domain.Status {
 		return domain.StatusQuarantined
 	default:
 		return domain.StatusCancelled
-	}
-}
-
-func (s *Service) reasonSummary(ft domain.FinalType) string {
-	switch ft {
-	case domain.FinalSign:
-		return "all nodes passed, sampling closed, dual review complete"
-	case domain.FinalQuarantine:
-		return "sampling or review failure isolated for rework"
-	default:
-		return "task cancelled"
 	}
 }
 

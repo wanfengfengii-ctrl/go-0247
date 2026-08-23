@@ -552,7 +552,10 @@ func (s *Service) allFinalComplete(t *InspectionTask) bool {
 
 // SubmitSampling records one sampling recheck conclusion for a sampled bolt.
 // An out-of-range reading commits the quarantine transition and returns the
-// stable SAMPLE_OUT_OF_RANGE error atomically.
+// stable SAMPLE_OUT_OF_RANGE error atomically. The quarantine is recorded as a
+// terminal FinalDecision in the same transaction, so the task view, the audit
+// stream and the final-decision record agree on the credential, the winning
+// operation and the reason — exactly as the arbiter competition path does.
 func (s *Service) SubmitSampling(taskID string, rev domain.Revision, r SamplingRequest) error {
 	digest := domain.Digest(r)
 	var opErr error
@@ -612,8 +615,21 @@ func (s *Service) SubmitSampling(taskID string, rev domain.Revision, r SamplingR
 			return err
 		}
 		t.Revision++
+		var quarantine *domain.FinalDecision
 		if result != domain.SampleOK {
 			t.Status = StatusQuarantined
+			// Record the quarantine as the single terminal decision in the same
+			// transaction, mirroring the arbiter competition path so the task
+			// view always carries the credential and winning operation.
+			d := domain.FinalDecision{
+				TaskID: taskID, Type: domain.FinalQuarantine, WinningOperation: r.OperationNo,
+				ReasonSummary: domain.ReasonSummary(domain.FinalQuarantine), SubmittedAt: s.clock.Now(),
+			}.WithCredential()
+			t.Credential = d.Credential
+			if err := tx.PutDecision(ctx, d); err != nil {
+				return err
+			}
+			quarantine = &d
 			opErr = domain.NewError(domain.CodeSampleOutOfRange, "sampling preload out of range").
 				WithReason(domain.Reason{Code: domain.CodeSampleOutOfRange, Node: r.NodeID, Bolt: r.BoltNo})
 		}
@@ -621,6 +637,9 @@ func (s *Service) SubmitSampling(taskID string, rev domain.Revision, r SamplingR
 			return err
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: "SAMPLING", ContentDigest: digest, Committed: true})
+		if quarantine != nil {
+			tx.AppendAudit(ctx, store.AuditEvent{TaskID: taskID, Operation: r.OperationNo, Kind: "FINALIZE_QUARANTINE", ContentDigest: quarantine.Credential, Committed: true})
+		}
 		return recordIdempotent(ctx, tx, r.OperationNo, taskID, digest)
 	})
 	if err != nil {

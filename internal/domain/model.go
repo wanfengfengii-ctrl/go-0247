@@ -268,3 +268,28 @@ type FinalDecision struct {
 	Credential       string      `json:"credential"`
 	SubmittedAt      time.Time   `json:"submitted_at"`
 }
+
+// WithCredential returns a copy of the decision with its terminal credential
+// derived from the frozen decision fields. The digest is taken before the
+// credential is set, so it is a pure function of TaskID, Type,
+// WinningOperation, ReasonSummary and SubmittedAt. Sharing this derivation
+// keeps the arbiter competition and the sampling-failure quarantine path
+// byte-identical for the same decision.
+func (d FinalDecision) WithCredential() FinalDecision {
+	d.Credential = "CRED-" + Digest(d)[:16]
+	return d
+}
+
+// ReasonSummary returns the canonical, type-specific reason summary used by
+// both the arbiter competition and the sampling-failure quarantine path, so a
+// quarantine recorded either way carries the same summary text.
+func ReasonSummary(t FinalType) string {
+	switch t {
+	case FinalSign:
+		return "all nodes passed, sampling closed, dual review complete"
+	case FinalQuarantine:
+		return "sampling or review failure isolated for rework"
+	default:
+		return "task cancelled"
+	}
+}
