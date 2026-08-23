@@ -174,7 +174,7 @@ func terminalStatus(ft domain.FinalType) domain.Status {
 func (s *Service) reasonSummary(ft domain.FinalType) string {
 	switch ft {
 	case domain.FinalSign:
-		return "all nodes passed, sampling closed, dual review complete"
+		return "all nodes passed, sampling closed, dual review complete, no active lease"
 	case domain.FinalQuarantine:
 		return "sampling or review failure isolated for rework"
 	default:
@@ -183,7 +183,10 @@ func (s *Service) reasonSummary(ft domain.FinalType) string {
 }
 
 // verifySignable re-checks the sign precondition inside the competition
-// transaction so a racing sampling result or lease cannot slip through.
+// transaction so a racing sampling result or lease cannot slip through. Sign
+// requires closed sampling, two independent reviews and no active device
+// lease: a torque device still leased to the task means fieldwork is not
+// surrendered and no handover credential may be issued.
 func (s *Service) verifySignable(ctx context.Context, tx store.Tx, t *domain.InspectionTask) error {
 	sampling, err := tx.ListSamplingResults(ctx, t.TaskID)
 	if err != nil {
@@ -199,6 +202,22 @@ func (s *Service) verifySignable(ctx context.Context, tx store.Tx, t *domain.Ins
 	}
 	if len(reviews) < 2 {
 		return domain.NewError(domain.CodeFinalizedConflict, "dual review incomplete")
+	}
+	leases, err := tx.ListLeases(ctx, t.TaskID)
+	if err != nil {
+		return err
+	}
+	now := s.clock.Now()
+	var active []domain.Reason
+	for _, l := range leases {
+		if l.Released || l.IsExpired(now) {
+			continue
+		}
+		active = append(active, domain.Reason{Code: domain.CodeDeviceBusy, Node: l.DeviceID})
+	}
+	if len(active) > 0 {
+		return domain.NewError(domain.CodeFinalizedConflict, "active device lease prevents sign-off").
+			WithReasons(active)
 	}
 	return nil
 }
