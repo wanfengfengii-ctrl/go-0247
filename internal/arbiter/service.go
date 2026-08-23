@@ -98,10 +98,36 @@ func (s *Service) SubmitReview(r ReviewRequest, personQualVersion, currentQualVe
 
 // Finalize runs the terminal competition. Only one decision wins; every loser
 // receives a stable FINALIZED_CONFLICT or TERMINAL_STATE error.
+//
+// A successful decision is recorded in the idempotency ledger keyed by the
+// operation number, so a client retry with the same operation number and the
+// same decision type replays the committed credential instead of failing with
+// TERMINAL_STATE. Reusing the same operation number with a different type
+// returns IDEMPOTENCY_CONFLICT, matching every other mutating operation.
 func (s *Service) Finalize(req FinalizeRequest) (*domain.FinalDecision, error) {
+	digest := domain.Digest(req)
 	var out *domain.FinalDecision
 	err := s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
+
+		// Idempotent replay: an identical retry returns the committed decision
+		// without touching the terminal state; a differing reuse is a conflict.
+		if replay, ok, err := tx.GetIdempotency(ctx, req.OperationNo, req.TaskID); err != nil {
+			return err
+		} else if ok {
+			if replay.Digest != digest {
+				return domain.NewError(domain.CodeIdempotencyConflict, "operation number reused with different content")
+			}
+			decision, err := tx.GetDecision(ctx, req.TaskID)
+			if err != nil {
+				return err
+			}
+			if decision != nil {
+				out = decision
+				return nil
+			}
+		}
+
 		t, err := tx.LoadTask(ctx, req.TaskID)
 		if err != nil {
 			return err
@@ -138,6 +164,13 @@ func (s *Service) Finalize(req FinalizeRequest) (*domain.FinalDecision, error) {
 			return err
 		}
 		tx.AppendAudit(ctx, store.AuditEvent{TaskID: req.TaskID, Operation: req.OperationNo, Kind: "FINALIZE_" + string(req.Type), ContentDigest: decision.Credential, Committed: true})
+
+		// Persist the idempotency binding so a network-timeout retry with the
+		// same operation number replays this credential rather than reporting a
+		// terminal state.
+		if err := tx.PutIdempotency(ctx, store.IdempotencyEntry{OperationNo: req.OperationNo, TaskID: req.TaskID, Digest: digest, Result: "{}"}); err != nil {
+			return err
+		}
 		out = &decision
 		return nil
 	})
