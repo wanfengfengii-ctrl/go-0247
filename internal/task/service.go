@@ -396,7 +396,12 @@ func (s *Service) runTrial(ctx context.Context, t *InspectionTask, r RecheckRequ
 		return device.Reading{}, err
 	}
 	if err := s.device.Stop(ctx, device.StopRequest{DeviceID: r.DeviceID}); err != nil {
-		return reading, nil
+		// A failure during Stop is still a device fault (e.g. a dropped
+		// connection after the reading). Per the failure boundaries a device
+		// rejection, disconnect or calibration lapse only writes a pending-retry
+		// record and never an effective trial, so the reading is discarded and
+		// the mapped error is propagated to be recorded as PENDING_RETRY.
+		return device.Reading{}, err
 	}
 	return reading, nil
 }
