@@ -62,6 +62,9 @@ const (
 	CodeSummaryMismatch      Code = "SUMMARY_MISMATCH"
 	CodeFinalizedConflict    Code = "FINALIZED_CONFLICT"
 	CodeTerminalState        Code = "TERMINAL_STATE"
+
+	// Request identity.
+	CodeTaskIdMismatch Code = "TASK_ID_MISMATCH"
 )
 
 // Reason is a single, sortable cause attached to a rejection. The failure

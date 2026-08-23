@@ -190,6 +190,15 @@ func (h *Handler) submitReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// The URL identifies the task; a request body carrying a different task_id is
+	// rejected so a review can never be recorded against the wrong task while the
+	// response projects the URL task's view.
+	id := r.PathValue("id")
+	if req.TaskID != "" && req.TaskID != id {
+		writeError(w, http.StatusBadRequest, domain.NewError(domain.CodeTaskIdMismatch, "task_id in body does not match the URL task id"))
+		return
+	}
+	req.TaskID = id
 	person, ok := h.deps.Catalog.PersonnelByID(req.PersonID)
 	if !ok {
 		writeError(w, http.StatusBadRequest, domain.NewError(domain.CodeReviewerNotQualified, "reviewer not in directory"))
@@ -199,7 +208,7 @@ func (h *Handler) submitReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	h.writeTaskView(w, r.PathValue("id"), http.StatusOK)
+	h.writeTaskView(w, id, http.StatusOK)
 }
 
 func (h *Handler) finalizeSign(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +231,15 @@ func (h *Handler) finalize(w http.ResponseWriter, r *http.Request, ft arbiter.Fi
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// The URL identifies the task; a request body carrying a different task_id is
+	// rejected so a finalize on one task can never silently consume another and
+	// return its credential.
+	id := r.PathValue("id")
+	if req.TaskID != "" && req.TaskID != id {
+		writeError(w, http.StatusBadRequest, domain.NewError(domain.CodeTaskIdMismatch, "task_id in body does not match the URL task id"))
+		return
+	}
+	req.TaskID = id
 	req.Type = ft
 	decision, err := h.deps.Arbiter.Finalize(req)
 	if err != nil {
