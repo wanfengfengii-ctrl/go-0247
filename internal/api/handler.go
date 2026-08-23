@@ -52,6 +52,12 @@ type Handler struct {
 // NewHandler builds the route table from the supplied domain ports.
 func NewHandler(d Deps) *Handler {
 	h := &Handler{deps: d}
+	// The clock drives lease-expiry reclamation in the task view; fall back to
+	// the host clock when a caller (e.g. a partial test wiring) omits it so the
+	// view never reports a stale active lease.
+	if h.deps.Clock == nil {
+		h.deps.Clock = domain.SystemClock{}
+	}
 	mux := http.NewServeMux()
 	h.register(mux)
 	h.mux = mux
@@ -212,12 +218,19 @@ func (h *Handler) buildView(id string) (*TaskView, error) {
 
 	err = h.deps.Store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
+		// Reclaim expired leases before projecting the active set so the task
+		// query agrees with lease reclamation (ClaimLease/Recover): a lease
+		// whose expiry has passed is no longer active, whether or not a later
+		// claim has flipped the released flag yet.
+		if _, err := tx.ReclaimExpiredLeases(ctx, h.deps.Clock.Now()); err != nil {
+			return err
+		}
 		leases, err := tx.ListLeases(ctx, id)
 		if err != nil {
 			return err
 		}
 		for _, l := range leases {
-			if !l.Released {
+			if !l.Released && !l.IsExpired(h.deps.Clock.Now()) {
 				view.ActiveLeases = append(view.ActiveLeases, l)
 			}
 		}
