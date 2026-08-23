@@ -391,14 +391,15 @@ func (s *Service) runTrial(ctx context.Context, t *InspectionTask, r RecheckRequ
 	if err := s.device.Start(ctx, device.StartRequest{DeviceID: r.DeviceID, CalibrationVersion: t.DeviceCalVersion}); err != nil {
 		return device.Reading{}, err
 	}
-	reading, err := s.device.Read(ctx, device.ReadRequest{DeviceID: r.DeviceID})
-	if err != nil {
-		return device.Reading{}, err
+	reading, rerr := s.device.Read(ctx, device.ReadRequest{DeviceID: r.DeviceID})
+	// Once the device has started it must be stopped even when the read
+	// fails: a mid-trial disconnect otherwise leaves the session occupied,
+	// and the next recheck would reuse the stale session. The read error
+	// stays authoritative so a pending-retry record is still committed.
+	if serr := s.device.Stop(ctx, device.StopRequest{DeviceID: r.DeviceID}); serr != nil && rerr == nil {
+		return device.Reading{}, serr
 	}
-	if err := s.device.Stop(ctx, device.StopRequest{DeviceID: r.DeviceID}); err != nil {
-		return device.Reading{}, err
-	}
-	return reading, nil
+	return reading, rerr
 }
 
 func (s *Service) successfulTrials(tx store.Tx, taskID string) int {
