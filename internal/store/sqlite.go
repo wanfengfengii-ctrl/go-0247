@@ -285,9 +285,15 @@ func (t *tx) ListSamplingResults(ctx context.Context, taskID string) ([]domain.S
 
 // --- connection tokens ------------------------------------------------------
 
+// InsertToken seeds a connection token into the global pool. The insert is
+// idempotent: a token that already exists (e.g. after a process restart against
+// an existing task database) is left untouched so a consumed or claimed token
+// is never reset, preserving the one-shot occupancy invariant. Only genuinely
+// absent tokens are inserted.
 func (t *tx) InsertToken(ctx context.Context, tok domain.ConnectionToken) error {
 	_, err := t.ExecContext(ctx,
-		`INSERT INTO connection_tokens(token_id, task_id, node_id, bolt_no, batch_summary, consumed, holder, released, revision) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO connection_tokens(token_id, task_id, node_id, bolt_no, batch_summary, consumed, holder, released, revision) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(token_id) DO NOTHING`,
 		tok.TokenID, tok.TaskID, tok.NodeID, tok.BoltNo, tok.BatchSummary, boolInt(tok.Consumed), tok.Holder, boolInt(tok.Released), int64(tok.Revision))
 	return err
 }
