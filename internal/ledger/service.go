@@ -21,12 +21,35 @@ func NewService(st store.Store, clock domain.Clock) *Service {
 	return &Service{store: st, clock: clock}
 }
 
-// ClaimToken binds an available connection token to a bolt. A concurrent claim
-// of the same token fails deterministically with TOKEN_BUSY.
+// requireOpenTask loads the task targeted by a resource claim and enforces the
+// existence and terminal-state fences inside the claim transaction, so a token
+// or lease can never be bound to a missing, already-signed, quarantined or
+// cancelled task. Device-lease callers additionally check the declared
+// generation against the loaded task.
+func requireOpenTask(ctx context.Context, tx store.Tx, taskID string) (*domain.InspectionTask, error) {
+	t, err := tx.LoadTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, domain.NewError(domain.CodeNodeNotFound, "task not found")
+	}
+	if t.Status.IsTerminal() {
+		return nil, domain.NewError(domain.CodeTerminalState, "task is in a terminal state")
+	}
+	return t, nil
+}
+
+// ClaimToken binds an available connection token to a bolt. The target task must
+// exist and be open; a concurrent claim of the same token fails
+// deterministically with TOKEN_BUSY.
 func (s *Service) ClaimToken(req ClaimTokenRequest) (*ConnectionToken, error) {
 	var out *ConnectionToken
 	err := s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
+		if _, err := requireOpenTask(ctx, tx, req.TaskID); err != nil {
+			return err
+		}
 		tok, err := tx.ClaimToken(ctx, req.TokenID, req.TaskID, req.NodeID, req.BoltNo, req.OperatorID)
 		if err != nil {
 			return err
@@ -64,6 +87,17 @@ func (s *Service) ClaimLease(req ClaimLeaseRequest) (*DeviceLease, error) {
 	var out *DeviceLease
 	err := s.store.WithTx(context.Background(), func(tx store.Tx) error {
 		ctx := context.Background()
+		// The target task must exist, be open and match the declared generation.
+		// Without this fence a claim against a signed/quarantined/cancelled task
+		// or a mistyped task id still succeeds and locks the device away from the
+		// genuinely open task.
+		t, err := requireOpenTask(ctx, tx, req.TaskID)
+		if err != nil {
+			return err
+		}
+		if t.Generation != req.Generation {
+			return domain.NewError(domain.CodeGenerationMismatch, "task generation mismatch")
+		}
 		l, err := tx.ClaimLease(ctx, leaseID, req.DeviceID, req.TaskID, req.Generation, req.OperatorID, req.CalibrationVersion, expiresAt, s.clock.Now())
 		if err != nil {
 			return err

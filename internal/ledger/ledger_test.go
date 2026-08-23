@@ -22,11 +22,28 @@ func newService(t *testing.T) (*store.SQLite, *ledger.Service) {
 	return s, ledger.NewService(s, domain.NewFakeClock(time.Unix(1700000000, 0)))
 }
 
+// seedTask persists an open inspection task so a resource claim targets a real,
+// non-terminal task. The ledger's existence and terminal-state fences now run
+// inside every claim transaction.
+func seedTask(t *testing.T, s *store.SQLite, id string, gen domain.Generation) {
+	t.Helper()
+	tk := &domain.InspectionTask{
+		TaskID: id, Generation: gen, Status: domain.StatusPairVerification, Revision: 1, LockSummary: "sum",
+	}
+	if err := s.WithTx(context.Background(), func(tx store.Tx) error {
+		return tx.SaveTask(context.Background(), tk, 0)
+	}); err != nil {
+		t.Fatalf("seed task %s: %v", id, err)
+	}
+}
+
 func TestConcurrentTokenClaimSingleWinner(t *testing.T) {
 	s, svc := newService(t)
 	if err := ledger.SeedTokens(context.Background(), s, []domain.ConnectionToken{{TokenID: "TOK-1", BatchSummary: "b/n/w", Revision: 1}}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	seedTask(t, s, "T-A", 1)
+	seedTask(t, s, "T-B", 1)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -60,7 +77,8 @@ func TestConcurrentTokenClaimSingleWinner(t *testing.T) {
 
 func TestConcurrentDeviceLeaseSingleWinner(t *testing.T) {
 	s, svc := newService(t)
-	_ = s
+	seedTask(t, s, "T-A", 1)
+	seedTask(t, s, "T-B", 2)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var wins, losses int
@@ -96,6 +114,7 @@ func TestReleaseUnconsumedToken(t *testing.T) {
 	if err := ledger.SeedTokens(context.Background(), s, []domain.ConnectionToken{{TokenID: "TOK-1", BatchSummary: "b/n/w", Revision: 1}}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	seedTask(t, s, "T-1", 1)
 	if _, err := svc.ClaimToken(ledger.ClaimTokenRequest{TaskID: "T-1", OperationNo: "op", OperatorID: "op", TokenID: "TOK-1", NodeID: "N-01", BoltNo: 1}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
